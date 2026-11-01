@@ -1,0 +1,25 @@
+{
+  "name": "studio-space-backend",
+  "version": "0.0.1",
+  "description": "",
+  "homepage": "https://github.com/Saif-nyt/Assignment-8-studio-space-Backend#readme",
+  "bugs": {
+    "url": "https://github.com/Saif-nyt/Assignment-8-studio-space-Backend/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Saif-nyt/Assignment-8-studio-space-Backend.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "mongodb": "^7.8.0"
+  }
+}
