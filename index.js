@@ -1,15 +1,22 @@
 import express from "express";
+import cors from "cors";
 import { MongoClient } from "mongodb";
 import "dotenv/config";
+
 const app = express();
 const port = process.env.PORT || 5001;
 
-
-
-
-const client = new MongoClient(
-process.env.MONGODB_URI 
+app.use(
+  cors({
+    origin: "http://localhost:3000", 
+    credentials: true,
+  }),
 );
+app.use(express.json());
+
+
+
+const client = new MongoClient(process.env.MONGODB_URI);
 
 export async function connectToMongoDB() {
   try {
@@ -20,7 +27,30 @@ export async function connectToMongoDB() {
     console.dir(err);
   }
 }
-connectToMongoDB()
+
+// Call this only when your application terminates
+
+  const dbclient = await connectToMongoDB();
+  const db = dbclient.db("Studio-space");
+  const bookingsCollection = db.collection("bookings");
+  console.log("You successfully connected to MongoDB!");
+
+
+
+
+app.post("/bookings", async (req, res) => {
+  
+    const booking = req.body;
+    const result = await bookingsCollection.insertOne(booking);
+
+ res.send(result)
+});
+app.get('/studios', async (req, res) => {
+    const studios = await bookingsCollection.find().toArray();
+    res.send(studios);
+  });
+
+
 
 
 app.get("/", (req, res) => {
