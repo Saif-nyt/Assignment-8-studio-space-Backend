@@ -1,8 +1,8 @@
 import express from "express";
 import cors from "cors";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
-
+import objectid from "mongodb";
 const app = express();
 const port = process.env.PORT || 5001;
 
@@ -50,8 +50,11 @@ app.get('/studios', async (req, res) => {
     res.send(studios);
   });
 
-
-
+app.get('/studios/:id', async (req, res) => {
+    const id = req.params.id;
+    const studio = await bookingsCollection.findOne({ _id:new ObjectId(id) });
+    res.send(studio);
+})
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
