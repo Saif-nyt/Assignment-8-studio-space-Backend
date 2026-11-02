@@ -12,7 +12,7 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 
 
@@ -35,8 +35,11 @@ export async function connectToMongoDB() {
   const bookingsCollection = db.collection("bookings");
   console.log("You successfully connected to MongoDB!");
 
-
-
+app.post('/add-studio', async (req, res) => {
+    const studio = req.body;
+    const result = await bookingsCollection.insertOne(studio);
+    res.send(result);
+  });
 
 app.post("/bookings", async (req, res) => {
   
