@@ -2,13 +2,14 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
 const port = process.env.PORT || 5001;
 
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
   }),
 );
@@ -31,6 +32,62 @@ const dbclient = await connectToMongoDB();
 const db = dbclient.db("Studio-space");
 const bookingsCollection = db.collection("bookings");
 const studiosCollection = db.collection("studios");
+
+
+
+const CLIENT_URL = process.env.CLIENT_URL.replace(/\/$/, "");
+
+const JWKS = createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
+
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+      return res.status(401).send({
+        message: "Authorization header missing",
+      });
+    }
+
+    const [scheme, token] = authHeader.trim().split(/\s+/);
+
+    if (scheme !== "Bearer" || !token) {
+      return res.status(401).send({
+        message: "Invalid authorization format",
+      });
+    }
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: CLIENT_URL,
+      audience: CLIENT_URL,
+    });
+
+    const userId = payload.id || payload.sub;
+
+    if (typeof userId !== "string" || typeof payload.email !== "string") {
+      return res.status(401).send({
+        message: "Invalid user information",
+      });
+    }
+
+    req.user = {
+      id: userId,
+      email: payload.email.trim().toLowerCase(),
+      name: payload.name || payload.email,
+    };
+
+    next();
+  } catch (error) {
+    console.error("JWT verification error:", error.message);
+
+    return res.status(401).send({
+      message: "Invalid or expired token",
+    });
+  }
+};
+
+
+
 
 app.post("/add-studio", async (req, res) => {
   try {
@@ -82,7 +139,7 @@ app.get("/studios/featured", async (req, res) => {
     });
   }
 });
-app.delete("/my-booking/:id", async (req, res) => {
+app.delete("/my-booking/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -106,7 +163,7 @@ app.delete("/my-booking/:id", async (req, res) => {
 });
 
 
-app.delete("/delete-studio/:id", async (req, res) => {
+app.delete("/delete-studio/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -130,7 +187,7 @@ app.delete("/delete-studio/:id", async (req, res) => {
 });
 
 
-app.get("/studios/:id", async (req, res) => {
+app.get("/studios/:id",verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
     const studio = await studiosCollection.findOne({ _id: new ObjectId(id) });
@@ -140,7 +197,7 @@ app.get("/studios/:id", async (req, res) => {
     res.status(500).send({ message: "Error fetching studio" });
   }
 });
-app.get("/my-bookings/:email", async (req, res) => {
+app.get("/my-bookings/:email", verifyToken, async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     const bookings = await bookingsCollection.find({ email }).toArray();
@@ -158,13 +215,22 @@ app.get("/", (req, res) => {
 });
 
 
-app.put("/studios/:id", async (req, res) => {
+app.put("/studios/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
 
     if (!ObjectId.isValid(id)) {
-      return res.status(400).send({ message: "Invalid studio ID" });
+      return res.status(400).send({
+        message: "Invalid studio ID",
+      });
+    }
+
+    const ownerEmail = (req.user?.email || "").trim().toLowerCase();
+
+    if (!ownerEmail) {
+      return res.status(401).send({
+        message: "User authentication information missing",
+      });
     }
 
     const existingStudio = await studiosCollection.findOne({
@@ -172,17 +238,16 @@ app.put("/studios/:id", async (req, res) => {
     });
 
     if (!existingStudio) {
-      return res.status(404).send({ message: "Studio not found" });
+      return res.status(404).send({
+        message: "Studio not found",
+      });
     }
 
-    // Basic ownership check. Add proper backend authentication
-    // before deploying this API publicly.
-    const ownerEmail = (updates.ownerEmail || "").trim().toLowerCase();
     const existingOwnerEmail = (existingStudio.ownerEmail || "")
       .trim()
       .toLowerCase();
 
-    if (!ownerEmail || ownerEmail !== existingOwnerEmail) {
+    if (ownerEmail !== existingOwnerEmail) {
       return res.status(403).send({
         message: "You are not allowed to edit this studio",
       });
@@ -204,20 +269,63 @@ app.put("/studios/:id", async (req, res) => {
     const safeUpdates = {};
 
     for (const field of allowedFields) {
-      if (updates[field] !== undefined) {
-        safeUpdates[field] = updates[field];
+      if (req.body[field] !== undefined) {
+        safeUpdates[field] = req.body[field];
       }
+    }
+
+    if (Object.keys(safeUpdates).length === 0) {
+      return res.status(400).send({
+        message: "No valid fields provided for update",
+      });
+    }
+
+    if (
+      safeUpdates.hourlyRate !== undefined &&
+      (!Number.isFinite(Number(safeUpdates.hourlyRate)) ||
+        Number(safeUpdates.hourlyRate) < 0)
+    ) {
+      return res.status(400).send({
+        message: "Invalid hourly rate",
+      });
+    }
+
+    if (
+      safeUpdates.securityDeposit !== undefined &&
+      (!Number.isFinite(Number(safeUpdates.securityDeposit)) ||
+        Number(safeUpdates.securityDeposit) < 0)
+    ) {
+      return res.status(400).send({
+        message: "Invalid security deposit",
+      });
+    }
+
+    if (
+      safeUpdates.maxCapacity !== undefined &&
+      (!Number.isInteger(Number(safeUpdates.maxCapacity)) ||
+        Number(safeUpdates.maxCapacity) < 1)
+    ) {
+      return res.status(400).send({
+        message: "Invalid maximum capacity",
+      });
     }
 
     safeUpdates.updatedAt = new Date();
 
     const result = await studiosCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: safeUpdates },
+      {
+        _id: new ObjectId(id),
+        ownerEmail: existingStudio.ownerEmail,
+      },
+      {
+        $set: safeUpdates,
+      },
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).send({ message: "Studio not found" });
+      return res.status(404).send({
+        message: "Studio not found",
+      });
     }
 
     const updatedStudio = await studiosCollection.findOne({
@@ -230,7 +338,10 @@ app.put("/studios/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("Update studio error:", error);
-    res.status(500).send({ message: "Failed to update studio" });
+
+    res.status(500).send({
+      message: "Failed to update studio",
+    });
   }
 });
 
