@@ -40,21 +40,72 @@ const studiosCollection = db.collection("studios");
 
 const JWKS = createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
 
+const AUTH_COOKIE = "studio_jwt";
+const isProduction = process.env.NODE_ENV === "production";
+
+const getCookie = (req, name) => {
+  const header = req.headers.cookie;
+
+  if (!header) return null;
+
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+
+    if (separator === -1) continue;
+
+    const key = part.slice(0, separator).trim();
+
+    if (key !== name) continue;
+
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return part.slice(separator + 1).trim();
+    }
+  }
+
+  return null;
+};
+
+const setAuthCookie = (res, token) => {
+  res.cookie(AUTH_COOKIE, token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+    path: "/",
+    maxAge: 60 * 60 * 1000,
+  });
+};
+
+const clearAuthCookie = (res) => {
+  res.clearCookie(AUTH_COOKIE, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+    path: "/",
+  });
+};
+
 const verifyToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
+    let token = getCookie(req, AUTH_COOKIE);
 
-    if (!authHeader) {
-      return res.status(401).send({
-        message: "Authorization header missing",
-      });
+    if (authHeader) {
+      const [scheme, headerToken] = authHeader.trim().split(/\s+/);
+
+      if (scheme !== "Bearer" || !headerToken) {
+        return res.status(401).send({
+          message: "Invalid authorization format",
+        });
+      }
+
+      token = headerToken;
     }
 
-    const [scheme, token] = authHeader.trim().split(/\s+/);
-
-    if (scheme !== "Bearer" || !token) {
+    if (!token) {
       return res.status(401).send({
-        message: "Invalid authorization format",
+        message: "Authorization token missing",
       });
     }
 
@@ -71,6 +122,7 @@ const verifyToken = async (req, res, next) => {
       });
     }
 
+    req.authToken = token;
     req.user = {
       id: userId,
       email: payload.email.trim().toLowerCase(),
@@ -147,7 +199,30 @@ app.get("/", (req, res) => {
   res.send("StudioSpace API is running!");
 });
 
-app.post("/add-studio", verifyToken, async (req, res) => {
+app.post("/auth/session", verifyToken, (req, res) => {
+  if (!req.authToken) {
+    return res.status(400).send({
+      message: "Bearer token missing",
+    });
+  }
+
+  setAuthCookie(res, req.authToken);
+
+  res.status(200).send({
+    message: "Session cookie set",
+    user: req.user,
+  });
+});
+
+app.post("/auth/logout", (req, res) => {
+  clearAuthCookie(res);
+
+  res.status(200).send({
+    message: "Session cleared",
+  });
+});
+
+app.post(["/add-studio", "/api/studios"], verifyToken, async (req, res) => {
   try {
     const {
       title,
@@ -161,6 +236,7 @@ app.post("/add-studio", verifyToken, async (req, res) => {
       amenities,
       overview,
       ownerImage,
+      rating,
     } = req.body;
 
     if (!title || !category || !location) {
@@ -191,6 +267,14 @@ app.post("/add-studio", verifyToken, async (req, res) => {
       });
     }
 
+    const parsedRating = rating === undefined ? 0 : Number(rating);
+
+    if (!Number.isFinite(parsedRating) || parsedRating < 0 || parsedRating > 5) {
+      return res.status(400).send({
+        message: "Rating must be between 0 and 5",
+      });
+    }
+
     const studio = {
       title,
       category,
@@ -206,7 +290,9 @@ app.post("/add-studio", verifyToken, async (req, res) => {
       ownerId: req.user.id,
       ownerName: req.user.name,
       ownerImage: ownerImage || "",
-      rating: 0,
+      rating: parsedRating,
+      reviewCount: 0,
+      reviews: [],
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -230,7 +316,7 @@ app.post("/add-studio", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/studios", async (req, res) => {
+app.get(["/studios", "/api/studios"], async (req, res) => {
   try {
     const studios = await studiosCollection.find().toArray();
 
@@ -244,7 +330,7 @@ app.get("/studios", async (req, res) => {
   }
 });
 
-app.get("/studios/featured", async (req, res) => {
+app.get(["/studios/featured", "/api/studios/featured"], async (req, res) => {
   try {
     const featuredStudios = await studiosCollection
       .find({})
@@ -262,7 +348,7 @@ app.get("/studios/featured", async (req, res) => {
   }
 });
 
-app.get("/studios/:id", verifyToken, async (req, res) => {
+app.get(["/studios/:id", "/api/studios/:id"], async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -292,7 +378,102 @@ app.get("/studios/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.put("/studios/:id", verifyToken, async (req, res) => {
+app.post(
+  ["/studios/:id/reviews", "/api/studios/:id/reviews"],
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!isValidObjectId(id)) {
+        return res.status(400).send({
+          message: "Invalid studio ID",
+        });
+      }
+
+      const comment = String(req.body.comment || "").trim();
+      const rating = Number(req.body.rating);
+
+      if (!comment) {
+        return res.status(400).send({
+          message: "Review comment is required",
+        });
+      }
+
+      if (comment.length > 1000) {
+        return res.status(400).send({
+          message: "Review comment is too long",
+        });
+      }
+
+      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+        return res.status(400).send({
+          message: "Rating must be a whole number between 1 and 5",
+        });
+      }
+
+      const studio = await studiosCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!studio) {
+        return res.status(404).send({
+          message: "Studio not found",
+        });
+      }
+
+      const reviews = Array.isArray(studio.reviews)
+        ? [...studio.reviews]
+        : [];
+
+      const review = {
+        name: req.user.name,
+        email: req.user.email,
+        rating,
+        comment,
+        date: new Date().toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
+        createdAt: new Date(),
+      };
+
+      reviews.unshift(review);
+
+      const averageRating =
+        reviews.reduce((total, item) => total + Number(item.rating || 0), 0) /
+        reviews.length;
+
+      await studiosCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            reviews,
+            reviewCount: reviews.length,
+            rating: Number(averageRating.toFixed(1)),
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      res.status(201).send({
+        message: "Review added successfully",
+        review,
+        rating: Number(averageRating.toFixed(1)),
+        reviewCount: reviews.length,
+      });
+    } catch (error) {
+      console.error("Add review error:", error);
+
+      res.status(500).send({
+        message: "Error adding review",
+      });
+    }
+  },
+);
+
+app.put(["/studios/:id", "/api/studios/:id"], verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -335,6 +516,7 @@ app.put("/studios/:id", verifyToken, async (req, res) => {
       "images",
       "amenities",
       "overview",
+      "rating",
     ];
 
     const safeUpdates = {};
@@ -387,6 +569,18 @@ app.put("/studios/:id", verifyToken, async (req, res) => {
       safeUpdates.maxCapacity = capacity;
     }
 
+    if (safeUpdates.rating !== undefined) {
+      const rating = Number(safeUpdates.rating);
+
+      if (!Number.isFinite(rating) || rating < 0 || rating > 5) {
+        return res.status(400).send({
+          message: "Rating must be between 0 and 5",
+        });
+      }
+
+      safeUpdates.rating = rating;
+    }
+
     safeUpdates.updatedAt = new Date();
 
     await studiosCollection.updateOne({ _id: studioId }, { $set: safeUpdates });
@@ -408,7 +602,10 @@ app.put("/studios/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.delete("/delete-studio/:id", verifyToken, async (req, res) => {
+app.delete(
+  ["/delete-studio/:id", "/api/studios/:id"],
+  verifyToken,
+  async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -454,7 +651,7 @@ app.delete("/delete-studio/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/bookings", verifyToken, async (req, res) => {
+app.post(["/bookings", "/api/bookings"], verifyToken, async (req, res) => {
   try {
     const { studioId, bookingDate, startTime, durationHours, noteToHost } =
       req.body;
@@ -529,7 +726,7 @@ app.post("/bookings", verifyToken, async (req, res) => {
       .toArray();
 
     const hasConflict = existingBookings.some((booking) => {
-      if (booking.status === "cancelled") {
+      if (String(booking.status || "").trim().toLowerCase() === "cancelled") {
         return false;
       }
 
@@ -601,7 +798,7 @@ app.post("/bookings", verifyToken, async (req, res) => {
       securityDeposit,
       totalAmount,
       noteToHost: noteToHost || "",
-      status: "confirmed",
+      status: "pending",
       createdAt: new Date(),
     };
 
@@ -662,14 +859,25 @@ app.delete("/my-booking/:id", verifyToken, async (req, res) => {
       });
     }
 
-    const result = await bookingsCollection.deleteOne({
-      _id: new ObjectId(id),
-      ...getBookingOwnerFilter(req.user),
-    });
+    const result = await bookingsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        ...getBookingOwnerFilter(req.user),
+        $nor: [{ status: /^cancelled$/i }],
+      },
+      {
+        $set: {
+          status: "cancelled",
+          cancelledAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    );
 
-    if (result.deletedCount === 0) {
+    if (result.matchedCount === 0) {
       return res.status(404).send({
-        message: "Booking not found or you do not own this booking",
+        message:
+          "Booking not found, already cancelled, or you do not own this booking",
       });
     }
 
